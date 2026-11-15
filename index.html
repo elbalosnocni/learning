@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>English Flashcard Auto-Indexer</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .container { max-width: 600px; width: 100%; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; }
+        h1 { color: #1a73e8; font-size: 24px; margin-bottom: 10px; }
+        select { padding: 10px; width: 100%; margin-bottom: 20px; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; }
+        .card { background: #ffffff; border: 2px solid #1a73e8; border-radius: 12px; padding: 40px 20px; min-height: 200px; display: flex; flex-direction: column; justify-content: center; align-items: center; cursor: pointer; transition: 0.3s; position: relative; }
+        .card:hover { box-shadow: 0 6px 16px rgba(26, 115, 232, 0.2); }
+        .en-text { font-size: 22px; font-weight: bold; color: #202124; margin-bottom: 15px; }
+        .vi-text { font-size: 18px; color: #188038; margin-bottom: 10px; display: none; }
+        .vocab-text { font-size: 14px; color: #5f6368; background: #f8f9fa; padding: 8px 12px; border-radius: 6px; display: none; }
+        .show-back .vi-text, .show-back .vocab-text { display: block; }
+        .controls { display: flex; justify-content: space-between; margin-top: 20px; gap: 10px; }
+        button { flex: 1; padding: 12px; border: none; border-radius: 8px; background: #1a73e8; color: white; font-size: 16px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #1557b0; }
+        button.audio-btn { background: #ea4335; margin-top: 15px; width: auto; padding: 8px 20px; font-size: 14px; }
+        .status { margin-top: 15px; font-size: 14px; color: #666; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>📚 Flashcard Luyện Tiếng Anh</h1>
+    <select id="lessonSelect" onchange="filterCards()">
+        <option value="ALL">Tất cả bài học</option>
+    </select>
+
+    <div class="card" id="flashcard" onclick="flipCard()">
+        <div class="en-text" id="enText">Đang tải dữ liệu từ Google Sheets...</div>
+        <div class="vi-text" id="viText"></div>
+        <div class="vocab-text" id="vocabText"></div>
+        <button class="audio-btn" id="audioBtn" onclick="playAudio(event)" style="display:none;">🔊 Nghe phát âm</button>
+    </div>
+
+    <div class="controls">
+        <button onclick="prevCard()">⬅️ Thẻ trước</button>
+        <button onclick="flipCard()">🔄 Lật thẻ</button>
+        <button onclick="nextCard()">Thẻ sau ➡️</button>
+    </div>
+    <div class="status" id="counter">0 / 0</div>
+</div>
+
+<script>
+    // THAY ID GOOGLE SHEET CỦA BẠN VÀO DÒNG DƯỚI ĐÂY
+    const SHEET_ID = "1WopxkEistgoP_NDrPKp4gDY_a5kaMAKYWgZFPRmBgec";
+    const SHEET_URL = `https://google.com{SHEET_ID}/gviz/tq?tqx=out:json`;
+
+    let allCards = [];
+    let filteredCards = [];
+    let currentIndex = 0;
+    let currentAudio = null;
+
+    async function fetchSheetData() {
+        try {
+            const res = await fetch(SHEET_URL);
+            const text = await res.text();
+            const json = JSON.parse(text.substring(47).slice(0, -2));
+            const rows = json.table.rows;
+
+            const lessons = new Set();
+            allCards = rows.slice(1).map(row => {
+                const lesson = row.c[0]?.v || "Chung";
+                lessons.add(lesson);
+                return {
+                    lesson: lesson,
+                    en: row.c[1]?.v || "",
+                    vi: row.c[2]?.v || "",
+                    vocab: row.c[3]?.v || "",
+                    audio: row.c[4]?.v || ""
+                };
+            }).filter(c => c.en !== "");
+
+            const select = document.getElementById("lessonSelect");
+            lessons.forEach(l => {
+                const opt = document.createElement("option");
+                opt.value = l;
+                opt.textContent = l;
+                select.appendChild(opt);
+            });
+
+            filteredCards = [...allCards];
+            renderCard();
+        } catch (err) {
+            document.getElementById("enText").textContent = "Lỗi tải dữ liệu. Hãy kiểm tra lại SHEET_ID và quyền chia sẻ công khai của file Sheet!";
+        }
+    }
+
+    function filterCards() {
+        const val = document.getElementById("lessonSelect").value;
+        filteredCards = val === "ALL" ? [...allCards] : allCards.filter(c => c.lesson === val);
+        currentIndex = 0;
+        renderCard();
+    }
+
+    function renderCard() {
+        const cardEl = document.getElementById("flashcard");
+        cardEl.classList.remove("show-back");
+        
+        if (filteredCards.length === 0) {
+            document.getElementById("enText").textContent = "Chưa có flashcard nào.";
+            document.getElementById("audioBtn").style.display = "none";
+            document.getElementById("counter").textContent = "0 / 0";
+            return;
+        }
+
+        const card = filteredCards[currentIndex];
+        document.getElementById("enText").textContent = card.en;
+        document.getElementById("viText").textContent = card.vi;
+        document.getElementById("vocabText").textContent = card.vocab;
+        document.getElementById("counter").textContent = `${currentIndex + 1} / ${filteredCards.length}`;
+
+        const audioBtn = document.getElementById("audioBtn");
+        if (card.audio) {
+            audioBtn.style.display = "inline-block";
+            currentAudio = new Audio(card.audio);
+        } else {
+            audioBtn.style.display = "none";
+        }
+    }
+
+    function flipCard() {
+        document.getElementById("flashcard").classList.toggle("show-back");
+    }
+
+    function playAudio(e) {
+        e.stopPropagation();
+        if (currentAudio) {
+            currentAudio.currentTime = 0;
+            currentAudio.play();
+        }
+    }
+
+    function nextCard() {
+        if (filteredCards.length === 0) return;
+        currentIndex = (currentIndex + 1) % filteredCards.length;
+        renderCard();
+    }
+
+    function prevCard() {
+        if (filteredCards.length === 0) return;
+        currentIndex = (currentIndex - 1 + filteredCards.length) % filteredCards.length;
+        renderCard();
+    }
+
+    fetchSheetData();
+</script>
+
+</body>
+</html>
