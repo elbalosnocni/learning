@@ -31,7 +31,7 @@ sheet = gc.open_by_key(SHEET_ID).sheet1
 drive_service = build('drive', 'v3', credentials=creds)
 
 LOG_FILE = "processed_log.json"
-PAGES_PER_BATCH = 3  # Xử lý mỗi lần 3 trang để không chạm giới hạn API
+PAGES_PER_BATCH = 1  # Xử lý mỗi lần 1 trang để không chạm giới hạn API
 
 def load_log():
     if os.path.exists(LOG_FILE):
@@ -118,7 +118,10 @@ def process_pdf_book(pdf_path, folder_name, processed_log):
         ]
         """
         try:
-            response = gemini_model.generate_content(prompt)
+            response = gemini_model.generate_content(
+                prompt,
+                request_options={"timeout": 300}
+            )
             clean_json = response.text.replace("```json", "").replace("```", "").strip()
             flashcards = json.loads(clean_json)
             
