@@ -163,8 +163,8 @@ def main():
             continue
             
         pdfs = glob.glob(os.path.join(folder_path, "*.pdf"))
-        if pdfs:
-            process_pdf_book(pdfs, folder, processed)
+        for pdf_file in pdfs:
+            process_pdf_book(pdf_file, folder, processed)
 
 if __name__ == "__main__":
     main()
