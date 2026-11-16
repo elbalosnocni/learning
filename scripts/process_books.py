@@ -6,8 +6,6 @@ import asyncio
 import fitz  # PyMuPDF
 import pytesseract
 from pdf2image import convert_from_path
-import whisper
-from pydub import AudioSegment
 import edge_tts
 import google.generativeai as genai
 import gspread
@@ -23,21 +21,24 @@ DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
 genai.configure(api_key=GEMINI_API_KEY)
 
 creds_dict = json.loads(GOOGLE_CREDS_JSON)
-scopes = ["https://googleapis.com", "https://googleapis.com"]
+scopes = [
+    "https://googleapis.com",
+    "https://googleapis.com"
+]
 creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(creds)
 sheet = gc.open_by_key(SHEET_ID).sheet1
 drive_service = build('drive', 'v3', credentials=creds)
 
 LOG_FILE = "processed_log.json"
-PAGES_PER_BATCH = 3  # Xử lý cuốn chiếu mỗi lần 3 trang để không bao giờ bị quá tải
+PAGES_PER_BATCH = 3  # Xử lý mỗi lần 3 trang để không chạm giới hạn API
 
 def load_log():
     if os.path.exists(LOG_FILE):
         try:
             with open(LOG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return []
     return []
 
@@ -46,7 +47,7 @@ def save_log(log_data):
         json.dump(log_data, f, ensure_ascii=False, indent=2)
 
 def extract_text_by_pages(pdf_path, start_page, end_page):
-    """Chỉ trích xuất văn bản trong khoảng trang chỉ định."""
+    """Trích xuất văn bản theo cụm trang, tự động OCR nếu là file scan."""
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
     end_page = min(end_page, total_pages)
@@ -55,9 +56,8 @@ def extract_text_by_pages(pdf_path, start_page, end_page):
     for p in range(start_page, end_page):
         text += doc[p].get_text()
         
-    # Nếu ít chữ -> Chạy OCR cho đúng khoảng trang đó
     if len(text.strip()) < 30:
-        print(f"Chạy OCR từ trang {start_page+1} đến {end_page}...")
+        print(f"Phát hiện trang scan: Chạy OCR từ trang {start_page+1} đến {end_page}...")
         images = convert_from_path(pdf_path, first_page=start_page+1, last_page=end_page)
         text = ""
         for img in images:
@@ -70,26 +70,30 @@ def upload_audio_to_drive(file_path, file_name):
     media = MediaFileUpload(file_path, mimetype='audio/mp3')
     file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
     file_id = file.get('id')
-    drive_service.permissions().create(fileId=file_id, body={'type': 'anyone', 'role': 'reader'}).execute()
+    
+    drive_service.permissions().create(
+        fileId=file_id,
+        body={'type': 'anyone', 'role': 'reader'}
+    ).execute()
+    
     return f"https://google.com{file_id}"
 
 async def generate_ai_audio(text, output_path, voice="en-US-AriaNeural"):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
 
-def process_pdf_only(pdf_path, folder_name, processed_log):
+def process_pdf_book(pdf_path, folder_name, processed_log):
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
     gemini_model = genai.GenerativeModel('gemini-1.5-flash')
     os.makedirs("temp_audio", exist_ok=True)
 
-    # Chia nhỏ sách thành từng cụm 3 trang
     for start_p in range(0, total_pages, PAGES_PER_BATCH):
         end_p = min(start_p + PAGES_PER_BATCH, total_pages)
         batch_id = f"{folder_name}_p{start_p+1}-{end_p}"
         
         if batch_id in processed_log:
-            continue  # Bỏ qua cụm trang đã làm xong trước đó
+            continue
 
         print(f"Đang xử lý {batch_id} / tổng {total_pages} trang...")
         raw_text, _ = extract_text_by_pages(pdf_path, start_p, end_p)
@@ -107,9 +111,9 @@ def process_pdf_only(pdf_path, folder_name, processed_log):
         Yêu cầu trả về ONLY JSON array (không markdown):
         [
           {{
-            "english": "Từ hoặc câu tiếng Anh",
-            "vietnamese": "Nghĩa tiếng Việt ngắn gọn",
-            "vocab": "Từ loại / Phiên âm / Ví dụ ngắn"
+            "english": "Từ hoặc câu tiếng Anh chuẩn xác",
+            "vietnamese": "Nghĩa tiếng Việt tự nhiên",
+            "vocab": "Từ loại / Phiên âm IPA / Ví dụ ngắn"
           }}
         ]
         """
@@ -122,23 +126,30 @@ def process_pdf_only(pdf_path, folder_name, processed_log):
             for idx, card in enumerate(flashcards):
                 chunk_filename = f"{batch_id}_card_{idx+1}.mp3"
                 chunk_path = os.path.join("temp_audio", chunk_filename)
+                
                 asyncio.run(generate_ai_audio(card["english"], chunk_path))
                 audio_url = upload_audio_to_drive(chunk_path, chunk_filename)
-                rows_to_insert.append([folder_name, card["english"], card["vietnamese"], card["vocab"], audio_url])
+                
+                rows_to_insert.append([
+                    folder_name,
+                    card["english"],
+                    card["vietnamese"],
+                    card["vocab"],
+                    audio_url
+                ])
                 
             if rows_to_insert:
                 sheet.append_rows(rows_to_insert)
                 print(f"-> Đã lưu {len(rows_to_insert)} thẻ từ {batch_id}")
                 
-            # Đánh dấu cụm trang này đã xong
             processed_log.append(batch_id)
             save_log(processed_log)
             
-            # Nghỉ 5 giây giữa các cụm để tránh chạm giới hạn tốc độ của Gemini API miễn phí
+            # Nghỉ 5 giây để tránh chạm giới hạn tốc độ của Gemini API miễn phí
             time.sleep(5)
             
         except Exception as e:
-            print(f"Tạm dừng tại {batch_id} do lỗi: {e}. Lần chạy sau sẽ tự chạy tiếp từ đây.")
+            print(f"Tạm dừng tại {batch_id} do lỗi: {e}. Lần chạy sau sẽ tự chạy tiếp.")
             break
 
 def main():
@@ -153,7 +164,7 @@ def main():
             
         pdfs = glob.glob(os.path.join(folder_path, "*.pdf"))
         if pdfs:
-            process_pdf_only(pdfs, folder, processed)
+            process_pdf_book(pdfs, folder, processed)
 
 if __name__ == "__main__":
     main()
