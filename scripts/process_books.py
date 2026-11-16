@@ -22,8 +22,8 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 creds_dict = json.loads(GOOGLE_CREDS_JSON)
 scopes = [
-    "https://googleapis.com",
-    "https://googleapis.com"
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
 ]
 creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
 gc = gspread.authorize(creds)
