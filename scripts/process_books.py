@@ -85,7 +85,7 @@ async def generate_ai_audio(text, output_path, voice="en-US-AriaNeural"):
 def process_pdf_book(pdf_path, folder_name, processed_log):
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
-    gemini_model = genai.GenerativeModel('gemini-3.0-flash')
+    gemini_model = genai.GenerativeModel('gemini-3.8-flash')
     os.makedirs("temp_audio", exist_ok=True)
 
     for start_p in range(0, total_pages, PAGES_PER_BATCH):
