@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'books/**'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -21,10 +22,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install system dependencies (OCR & Audio)
+      - name: Install system dependencies (OCR)
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr poppler-utils ffmpeg
+          sudo apt-get install -y tesseract-ocr poppler-utils
 
       - name: Install Python dependencies
         run: |
@@ -45,6 +46,5 @@ jobs:
           git config --local user.email "github-actions[bot]@://github.com"
           git config --local user.name "github-actions[bot]"
           git add processed_log.json
-          git commit -m "Update processed books log" || echo "No changes to commit"
+          git commit -m "Update processed pages log" || echo "No changes to commit"
           git push
-
