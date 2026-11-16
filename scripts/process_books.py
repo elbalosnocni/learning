@@ -1,11 +1,13 @@
 import os
 import json
 import glob
+import asyncio
 import fitz  # PyMuPDF
 import pytesseract
 from pdf2image import convert_from_path
 import whisper
 from pydub import AudioSegment
+import edge_tts
 import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
@@ -35,8 +37,11 @@ LOG_FILE = "processed_log.json"
 
 def load_log():
     if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return []
     return []
 
 def save_log(log_data):
@@ -50,7 +55,6 @@ def extract_text_from_pdf(pdf_path):
     for page in doc:
         text += page.get_text()
     
-    # Nếu ít chữ, khả năng cao là file scan -> Chuyển sang OCR
     if len(text.strip()) < 50:
         print(f"Phát hiện file scan: {pdf_path}. Đang chạy OCR...")
         images = convert_from_path(pdf_path)
@@ -60,7 +64,7 @@ def extract_text_from_pdf(pdf_path):
     return text
 
 def upload_audio_to_drive(file_path, file_name):
-    """Tải đoạn audio đã cắt lên Google Drive và trả về link nghe trực tiếp."""
+    """Tải file audio lên Google Drive và trả về link nghe trực tiếp."""
     file_metadata = {
         'name': file_name,
         'parents': [DRIVE_FOLDER_ID]
@@ -69,7 +73,6 @@ def upload_audio_to_drive(file_path, file_name):
     file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
     file_id = file.get('id')
     
-    # Mở quyền xem công khai để flashcard có thể phát âm thanh
     drive_service.permissions().create(
         fileId=file_id,
         body={'type': 'anyone', 'role': 'reader'}
@@ -77,33 +80,28 @@ def upload_audio_to_drive(file_path, file_name):
     
     return f"https://google.com{file_id}"
 
-def process_pair(pdf_path, audio_path, folder_name):
-    print(f"Đang xử lý bộ: {folder_name}")
+async def generate_ai_audio(text, output_path, voice="en-US-AriaNeural"):
+    """Tạo giọng đọc AI tự nhiên bằng Edge-TTS."""
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_path)
+
+def process_with_audio(pdf_path, audio_path, folder_name):
+    """Xử lý khi có cả PDF và file Audio gốc."""
+    print(f"[{folder_name}] Chạy chế độ: PDF + Audio gốc")
     raw_text = extract_text_from_pdf(pdf_path)
     
-    # 1. Dùng Whisper lấy timestamp từng câu trong file audio dài
-    print("Đang phân tích mốc thời gian audio bằng Whisper...")
     model = whisper.load_model("base")
     result = model.transcribe(audio_path, language="en")
     segments = result["segments"]
     
-    # 2. Dùng Gemini để chuẩn hóa câu, dịch nghĩa và trích xuất từ vựng
-    print("Đang tạo nội dung flashcard bằng Gemini...")
     gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    # Gửi các segment từ Whisper kèm ngữ cảnh từ PDF để Gemini đối chiếu và dịch
     segments_text = "\n".join([f"[{s['start']:.2f} - {s['end']:.2f}]: {s['text']}" for s in segments])
     prompt = f"""
-    Dưới đây là văn bản gốc từ sách PDF và các đoạn thoại đã nhận diện thời gian từ file Audio.
-    Hãy đối chiếu để sửa lỗi chính tả (nếu có) từ bản nhận diện audio dựa theo sách PDF, sau đó trả về danh sách JSON các flashcard.
+    Đối chiếu văn bản sách PDF và các đoạn thoại từ Audio để sửa lỗi chính tả, sau đó trả về danh sách JSON các flashcard.
+    Văn bản sách PDF: {raw_text[:4000]}
+    Các đoạn Audio: {segments_text}
     
-    Văn bản sách PDF:
-    {raw_text[:4000]}
-    
-    Các đoạn Audio:
-    {segments_text}
-    
-    Yêu cầu định dạng trả về ONLY JSON array (không markdown):
+    Yêu cầu trả về ONLY JSON array (không markdown):
     [
       {{
         "start": 0.0,
@@ -118,14 +116,13 @@ def process_pair(pdf_path, audio_path, folder_name):
     clean_json = response.text.replace("```json", "").replace("```", "").strip()
     flashcards = json.loads(clean_json)
     
-    # 3. Cắt audio, upload Drive và ghi vào Google Sheets
     full_audio = AudioSegment.from_file(audio_path)
     os.makedirs("temp_audio", exist_ok=True)
     
     rows_to_insert = []
     for idx, card in enumerate(flashcards):
-        start_ms = max(0, int(card["start"] * 1000) - 200) # Dư 0.2s đầu
-        end_ms = min(len(full_audio), int(card["end"] * 1000) + 300) # Dư 0.3s cuối
+        start_ms = max(0, int(card["start"] * 1000) - 200)
+        end_ms = min(len(full_audio), int(card["end"] * 1000) + 300)
         
         chunk = full_audio[start_ms:end_ms]
         chunk_filename = f"{folder_name}_card_{idx+1}.mp3"
@@ -133,22 +130,59 @@ def process_pair(pdf_path, audio_path, folder_name):
         chunk.export(chunk_path, format="mp3")
         
         audio_url = upload_audio_to_drive(chunk_path, chunk_filename)
-        
-        rows_to_insert.append([
-            folder_name,
-            card["english"],
-            card["vietnamese"],
-            card["vocab"],
-            audio_url
-        ])
+        rows_to_insert.append([folder_name, card["english"], card["vietnamese"], card["vocab"], audio_url])
         
     if rows_to_insert:
         sheet.append_rows(rows_to_insert)
-        print(f"Đã thêm {len(rows_to_insert)} flashcard vào Google Sheets!")
+        print(f"Đã thêm {len(rows_to_insert)} flashcard (Audio gốc) vào Google Sheets!")
+
+def process_pdf_only(pdf_path, folder_name):
+    """Xử lý khi chỉ có file PDF -> Dùng giọng đọc AI."""
+    print(f"[{folder_name}] Chạy chế độ: Chỉ có PDF + Giọng đọc AI")
+    raw_text = extract_text_from_pdf(pdf_path)
+    
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    prompt = f"""
+    Dưới đây là nội dung trích xuất từ một sách học tiếng Anh. Hãy lọc ra các từ vựng, cụm từ hoặc câu giao tiếp quan trọng nhất trong bài để tạo thành bộ flashcard học tiếng Anh (tối đa 30 thẻ).
+    
+    Nội dung sách:
+    {raw_text[:6000]}
+    
+    Yêu cầu trả về ONLY JSON array (không markdown):
+    [
+      {{
+        "english": "Từ vựng hoặc câu tiếng Anh chuẩn xác",
+        "vietnamese": "Nghĩa tiếng Việt tự nhiên",
+        "vocab": "Giải thích ngữ pháp / từ loại / ví dụ ngắn"
+      }}
+    ]
+    """
+    response = gemini_model.generate_content(prompt)
+    clean_json = response.text.replace("```json", "").replace("```", "").strip()
+    flashcards = json.loads(clean_json)
+    
+    os.makedirs("temp_audio", exist_ok=True)
+    rows_to_insert = []
+    
+    for idx, card in enumerate(flashcards):
+        chunk_filename = f"{folder_name}_ai_{idx+1}.mp3"
+        chunk_path = os.path.join("temp_audio", chunk_filename)
+        
+        # Tạo file âm thanh bằng giọng đọc AI
+        asyncio.run(generate_ai_audio(card["english"], chunk_path))
+        
+        audio_url = upload_audio_to_drive(chunk_path, chunk_filename)
+        rows_to_insert.append([folder_name, card["english"], card["vietnamese"], card["vocab"], audio_url])
+        
+    if rows_to_insert:
+        sheet.append_rows(rows_to_insert)
+        print(f"Đã thêm {len(rows_to_insert)} flashcard (Giọng đọc AI) vào Google Sheets!")
 
 def main():
     processed = load_log()
-    # Quét tất cả thư mục con trong books/
+    if not os.path.exists("books"):
+        return
+
     for folder in os.listdir("books"):
         folder_path = os.path.join("books", folder)
         if not os.path.isdir(folder_path) or folder in processed:
@@ -158,7 +192,11 @@ def main():
         audios = glob.glob(os.path.join(folder_path, "*.mp3")) + glob.glob(os.path.join(folder_path, "*.m4a")) + glob.glob(os.path.join(folder_path, "*.wav"))
         
         if pdfs and audios:
-            process_pair(pdfs[0], audios[0], folder)
+            process_with_audio(pdfs[0], audios[0], folder)
+            processed.append(folder)
+            save_log(processed)
+        elif pdfs and not audios:
+            process_pdf_only(pdfs[0], folder)
             processed.append(folder)
             save_log(processed)
 
